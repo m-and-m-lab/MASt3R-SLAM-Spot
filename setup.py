@@ -1,5 +1,5 @@
 from pathlib import Path
-from setuptools import setup
+from setuptools import setup, Extension
 
 import torch
 from torch.utils.cpp_extension import BuildExtension, CppExtension
@@ -20,6 +20,8 @@ extra_compile_args = {
     "cores": ["j8"],
     "cxx": ["-O3"],
 }
+
+ext_modules = []
 
 if has_cuda:
     from torch.utils.cpp_extension import CUDAExtension

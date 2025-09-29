@@ -6,9 +6,14 @@ import numpy as np
 import torch
 import pyrealsense2 as rs
 import yaml
+import os
 
 from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
+
+from types import SimpleNamespace
+from bosdyn.client import create_standard_sdk
+from bosdyn.client.image import ImageClient
 
 HAS_TORCHCODEC = True
 try:
@@ -61,6 +66,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         self.timestamps = self.timestamps[::subsample]
 
     def has_calib(self):
+        print("Camera intrinsics: ", self.camera_intrinsics)
         return self.camera_intrinsics is not None
 
 
@@ -147,6 +153,88 @@ class SevenScenesDataset(MonocularDataset):
             self.img_size, 640, 480, [fx, fy, cx, cy]
         )
 
+def mock_image_client(video_path):
+        cap = cv2.VideoCapture(video_path)
+        print("Mock stream FPS: ", cap.get(cv2.CAP_PROP_FPS))
+        cap.read()
+        while True:
+            ret, frame = cap.read()
+            if not ret: 
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+        
+            response = SimpleNamespace()
+            response.shot = SimpleNamespace()
+            response.shot.image = SimpleNamespace()
+
+            _, buf = cv2.imencode(".jpg", frame)
+            response.shot.image.data = buf.tobytes()
+            response.shot.image.format = "jpeg"
+            yield response
+
+class SpotCameraStream:
+    def __init__(self, source = "frontleft_fisheye_image"):
+        robot_ip = os.environ.get("SPOT_IP")
+        password = os.environ.get("SPOT_ADMIN_PW")
+
+        sdk = create_standard_sdk("MASt3R-SLAM")
+        robot = sdk.create_robot(robot_ip)
+        robot.authenticate("admin", password)
+        robot.time_sync.wait_for_sync()
+
+        self.image_client = robot.ensure_client(ImageClient.default_service_name)
+        self.source = source
+
+        resp = self.image_client.get_image_sources([self.source])[0]
+        pinhole = resp.source.pinhole.intrinsics
+        self.intrinsics = [pinhole.focal_length.x, pinhole.focal_length.y, pinhole.principal_point.x, pinhole.principal_point.y]
+
+    def frames(self):
+        while True:
+            responses = self.image_client.get_image([self.source])
+            yield responses[0]
+    
+
+class SpotDataset(MonocularDataset):
+    def __init__(self, mode="mock", dataset_path="sample.mp4"):
+        super().__init__()
+        self.use_calibration = False
+        self.timestamps = []
+        self.dataset_path = pathlib.Path(dataset_path)
+        self.mode = mode
+        self.frame_idx = 0
+
+        if self.mode == "mock":
+            self.stream = mock_image_client(dataset_path)
+            self.fps = 30.0
+        if self.mode == "real":
+            self.stream = SpotCameraStream().frames()
+
+    def __len__(self):
+        return 99999999
+    
+    
+    def get_timestamp(self, idx):
+        return super().get_timestamp(idx)
+    
+    def get_img_shape(self):
+        img = self.read_img(0)
+        raw_img_shape = img.shape
+        img = resize_img(img, self.img_size)
+        return img["img"][0].shape[1:], raw_img_shape[:2]
+    
+    def read_img(self, idx):
+        response = next(self.stream)
+
+        if response.shot.image.format == "jpeg":
+            img = cv2.imdecode(np.frombuffer(response.shot.image.data, np.uint8), cv2.IMREAD_COLOR)
+        else:
+            img = response.shot.image.data
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(self.dtype)
+        self.timestamps.append(idx/30.0)
+        self.frame_idx += 1
+        return img
 
 class RealsenseDataset(MonocularDataset):
     def __init__(self):
@@ -270,7 +358,7 @@ class RGBFiles(MonocularDataset):
         super().__init__()
         self.use_calibration = False
         self.dataset_path = pathlib.Path(dataset_path)
-        self.rgb_files = natsorted(list((self.dataset_path).glob("*.png")))
+        self.rgb_files = natsorted(list((self.dataset_path).glob("*.[jpJP][npNP][egEG]*")))
         self.timestamps = np.arange(0, len(self.rgb_files)).astype(self.dtype) / 30.0
 
 
@@ -331,6 +419,10 @@ def load_dataset(dataset_path):
         return RealsenseDataset()
     if "webcam" in split_dataset_type:
         return Webcam()
+    if "spot_mock" in split_dataset_type:
+        return SpotDataset(mode="mock", dataset_path="./sample_scene.mp4")
+    if "spot_real" in split_dataset_type:
+        return SpotDataset(mode="real")
 
     ext = split_dataset_type[-1].split(".")[-1]
     if ext in ["mp4", "avi", "MOV", "mov"]:
