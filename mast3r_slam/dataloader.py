@@ -1,4 +1,7 @@
+from collections import namedtuple
 import pathlib
+import datetime
+
 import re
 import cv2
 from natsort import natsorted
@@ -13,7 +16,9 @@ from mast3r_slam.config import config
 
 from types import SimpleNamespace
 from bosdyn.client import create_standard_sdk
-from bosdyn.client.image import ImageClient
+from bosdyn.client.image import ImageClient, build_image_request
+from bosdyn.api import image_pb2
+
 
 HAS_TORCHCODEC = True
 try:
@@ -153,6 +158,30 @@ class SevenScenesDataset(MonocularDataset):
             self.img_size, 640, 480, [fx, fy, cx, cy]
         )
 
+Shot = namedtuple('Shot', ['image'])
+Image = namedtuple('Image', ['data', 'format'])
+ImageResponse = namedtuple('ImageResponse', ['shot'])
+
+def mock_image_client_webcam(camera_id=0):
+    cap = cv2.VideoCapture(camera_id)
+    if not cap.isOpened():
+        raise ValueError("Failed to open webcam")
+    print("Mock stream FPS: ", cap.get(cv2.CAP_PROP_FPS))
+    cap.read()
+    while True:
+        ret, frame = cap.read()
+        if not ret: 
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+
+        ret, buf = cv2.imencode(".jpg", frame)
+        if not ret:
+            continue
+        jpeg_bytes = buf.tobytes()
+
+        response = ImageResponse(shot = Shot(image=Image(data=jpeg_bytes, format="jpeg")))
+        yield response
+
 def mock_image_client(video_path):
         cap = cv2.VideoCapture(video_path)
         print("Mock stream FPS: ", cap.get(cv2.CAP_PROP_FPS))
@@ -172,6 +201,11 @@ def mock_image_client(video_path):
             response.shot.image.format = "jpeg"
             yield response
 
+
+def pixel_format_string_to_enum(enum_string):
+    return dict(image_pb2.Image.PixelFormat.items()).get(enum_string)
+
+
 class SpotCameraStream:
     def __init__(self, source = "frontleft_fisheye_image"):
         robot_ip = os.environ.get("SPOT_IP")
@@ -183,32 +217,41 @@ class SpotCameraStream:
         robot.time_sync.wait_for_sync()
 
         self.image_client = robot.ensure_client(ImageClient.default_service_name)
-        self.source = source
+        self.source = source  # store as string
 
-        resp = self.image_client.get_image_sources([self.source])[0]
+        # Get intrinsics from a single request for initialization
+        req = build_image_request(self.source, 100, pixel_format=pixel_format_string_to_enum("PIXEL_FORMAT_RGB_U8"))
+        resp = self.image_client.get_image([req])[0]
         pinhole = resp.source.pinhole.intrinsics
         self.intrinsics = [pinhole.focal_length.x, pinhole.focal_length.y, pinhole.principal_point.x, pinhole.principal_point.y]
 
     def frames(self):
         while True:
-            responses = self.image_client.get_image([self.source])
+            image_request = build_image_request(self.source, 100, pixel_format=pixel_format_string_to_enum("PIXEL_FORMAT_RGB_U8"))
+            responses = self.image_client.get_image([image_request])
+            print("Got image from Spot camera:", len(responses))
             yield responses[0]
-    
+            
 
 class SpotDataset(MonocularDataset):
     def __init__(self, mode="mock", dataset_path="sample.mp4"):
         super().__init__()
         self.use_calibration = False
         self.timestamps = []
-        self.dataset_path = pathlib.Path(dataset_path)
+        # Make dataset_path unique by appending timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_path = f"{dataset_path}_{timestamp}"
+        self.dataset_path = pathlib.Path(unique_path)
         self.mode = mode
         self.frame_idx = 0
 
         if self.mode == "mock":
-            self.stream = mock_image_client(dataset_path)
+            self.stream = mock_image_client_webcam()
             self.fps = 30.0
         if self.mode == "real":
-            self.stream = SpotCameraStream().frames()
+            spot = SpotCameraStream()
+            self.stream = spot.frames()
+            self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, spot.intrinsics)
 
     def __len__(self):
         return 99999999
@@ -222,16 +265,31 @@ class SpotDataset(MonocularDataset):
         raw_img_shape = img.shape
         img = resize_img(img, self.img_size)
         return img["img"][0].shape[1:], raw_img_shape[:2]
+
+    def subsample(self, subsample):
+    # No-op for streaming datasets
+        pass
     
     def read_img(self, idx):
         response = next(self.stream)
+        print("Format: ", response.shot.image.format)
+
 
         if response.shot.image.format == "jpeg":
             img = cv2.imdecode(np.frombuffer(response.shot.image.data, np.uint8), cv2.IMREAD_COLOR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(self.dtype)
+        elif response.shot.image.format == 1:
+            data = np.frombuffer(response.shot.image.data, dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         else:
-            img = response.shot.image.data
+            raise ValueError(f"Unsupported image format: {response.shot.image.format}")
+        
+        if img is None:
+            raise ValueError("Failed to decode compressed image from Spot response")
+        
+        cv2.imshow("Spot Image", img)
+        cv2.waitKey(1)
 
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(self.dtype)
         self.timestamps.append(idx/30.0)
         self.frame_idx += 1
         return img
