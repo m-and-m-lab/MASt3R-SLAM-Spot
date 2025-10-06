@@ -50,6 +50,7 @@ cd MASt3R-SLAM/
 
 pip install -e thirdparty/mast3r
 pip install -e thirdparty/in3d
+pip install -e third_party/FastSAM
 pip install --no-build-isolation -e .
  
 

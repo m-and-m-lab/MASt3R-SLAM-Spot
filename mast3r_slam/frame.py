@@ -26,6 +26,7 @@ class Frame:
     C: Optional[torch.Tensor] = None
     feat: Optional[torch.Tensor] = None
     pos: Optional[torch.Tensor] = None
+    seg_colors: Optional[torch.Tensor] = None
     N: int = 0
     N_updates: int = 0
     K: Optional[torch.Tensor] = None
@@ -153,7 +154,11 @@ class SharedStates:
         self.pos = torch.zeros(1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
         # fmt: on
 
-    def set_frame(self, frame):
+        self.seg_colors = torch.zeros(
+            h, w, 3, device="cpu", dtype=dtype
+        ).share_memory_()
+
+    def set_frame(self, frame: Frame):
         with self.lock:
             self.dataset_idx[:] = frame.frame_id
             self.img[:] = frame.img
@@ -165,6 +170,8 @@ class SharedStates:
             self.C[:] = frame.C
             self.feat[:] = frame.feat
             self.pos[:] = frame.pos
+            if frame.seg_colors is not None:
+                self.seg_colors[:] = frame.seg_colors
 
     def get_frame(self):
         with self.lock:
@@ -180,6 +187,7 @@ class SharedStates:
             frame.C = self.C
             frame.feat = self.feat
             frame.pos = self.pos
+            frame.seg_colors = self.seg_colors
             return frame
 
     def queue_global_optimization(self, idx):
@@ -247,6 +255,10 @@ class SharedKeyframes:
         self.K = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
         # fmt: on
 
+        self.seg_colors = torch.zeros(
+            buffer, h, w, 3, device="cpu", dtype=dtype
+        ).share_memory_()
+
     def __getitem__(self, idx) -> Frame:
         with self.lock:
             # put all of the data into a frame
@@ -266,6 +278,7 @@ class SharedKeyframes:
             kf.N_updates = int(self.N_updates[idx])
             if config["use_calib"]:
                 kf.K = self.K
+            kf.seg_colors = self.seg_colors[idx]
             return kf
 
     def __setitem__(self, idx, value: Frame) -> None:
@@ -286,6 +299,8 @@ class SharedKeyframes:
             self.N[idx] = value.N
             self.N_updates[idx] = value.N_updates
             self.is_dirty[idx] = True
+            if value.seg_colors is not None:
+                self.seg_colors[idx] = value.seg_colors
             return idx
 
     def __len__(self):

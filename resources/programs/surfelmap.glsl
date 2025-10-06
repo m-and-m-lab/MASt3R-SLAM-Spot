@@ -19,6 +19,8 @@ uniform float radius = 0.003;
 uniform sampler2D pointmap;
 uniform sampler2D confs;
 uniform sampler2D img;
+uniform sampler2D seg_texture;
+uniform bool use_seg = false;
 
 out vec3 normal;
 out vec3 position;
@@ -43,7 +45,12 @@ void main(void) {
   vec3 xyz00 = texelFetch(pointmap, ivec2(x, y), 0).xyz;
   vec3 xyz01 = texelFetch(pointmap, ivec2(x, y+1), 0).xyz;
   vec3 xyz10 = texelFetch(pointmap, ivec2(x+1, y), 0).xyz;
-  vec3 color00 = texelFetch(img, ivec2(x, y), 0).xyz;
+  vec3 color00;
+  if (use_seg) {
+      color00 = texelFetch(seg_texture, ivec2(x, y), 0).xyz;
+  } else {
+      color00 = texelFetch(img, ivec2(x, y), 0).xyz;
+  }
 
 
   vec3 right = xyz10 - xyz00;

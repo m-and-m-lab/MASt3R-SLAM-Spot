@@ -8,6 +8,7 @@ import lietorch
 import torch
 import tqdm
 import yaml
+import numpy as np
 from mast3r_slam.global_opt import FactorGraph
 
 from mast3r_slam.config import load_config, config, set_global_config
@@ -22,6 +23,7 @@ from mast3r_slam.mast3r_utils import (
 from mast3r_slam.multiprocess_utils import new_queue, try_get_msg
 from mast3r_slam.tracker import FrameTracker
 from mast3r_slam.visualization import WindowMsg, run_visualization
+from mast3r_slam.segmentation import SegmentationModule
 import torch.multiprocessing as mp
 
 
@@ -171,6 +173,12 @@ if __name__ == "__main__":
     dataset.subsample(config["dataset"]["subsample"])
     h, w = dataset.get_img_shape()[0]
 
+    segmentation = SegmentationModule(
+        model_path=config.get("segmentation", {}).get("model_path", "FastSAM-x.pt"),
+        device=device,
+        enabled=config.get("segmentation", {}).get("enabled", False),
+    )
+
     if args.calib:
         with open(args.calib, "r") as f:
             intrinsics = yaml.load(f, Loader=yaml.SafeLoader)
@@ -225,7 +233,6 @@ if __name__ == "__main__":
     backend = mp.Process(target=run_backend, args=(config, model, states, keyframes, K))
     backend.start()
 
-
     i = 0
     fps_timer = time.time()
     frames = []
@@ -266,6 +273,16 @@ if __name__ == "__main__":
                 # Initialize via mono inference, and encoded features neeed for database
                 X_init, C_init = mast3r_inference_mono(model, frame)
                 frame.update_pointmap(X_init, C_init)
+
+                if segmentation.enabled:
+                    img_np = img if isinstance(img, np.ndarray) else img
+                    seg_colors = segmentation.segment_image(img_np)
+
+                    if seg_colors is not None:
+                        h, w = frame.img_shape.flatten().cpu().numpy()
+                        seg_colors = cv2.resize(seg_colors, (int(w), int(h)))
+                        frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
+
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
                 states.set_mode(Mode.TRACKING)
@@ -295,6 +312,17 @@ if __name__ == "__main__":
                 raise Exception("Invalid mode")
 
             if add_new_kf:
+                if segmentation.enabled:
+                    img_np = img if isinstance(img, np.ndarray) else img
+                    seg_colors = segmentation.segment_image(img_np)
+
+                    if seg_colors is not None:
+                        import cv2
+
+                        h, w = frame.img_shape.flatten().cpu().numpy()
+                        seg_colors = cv2.resize(seg_colors, (int(w), int(h)))
+                        frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
+
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
                 # In single threaded mode, wait for the backend to finish
@@ -314,6 +342,7 @@ if __name__ == "__main__":
     except Exception as e:
         print("Exception in main loop:", e)
         import traceback
+
         traceback.print_exc()
         states.set_mode(Mode.TERMINATED)
     finally:

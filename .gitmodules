@@ -4,3 +4,6 @@
 [submodule "thirdparty/in3d/thirdparty/pyimgui"]
 	path = thirdparty/in3d/thirdparty/pyimgui
 	url = https://github.com/pyimgui/pyimgui.git
+[submodule "thirdparty/FastSAM"]
+	path = thirdparty/FastSAM
+	url = https://github.com/CASIA-IVA-Lab/FastSAM.git

@@ -95,6 +95,8 @@ class Window(WindowEvents):
         self.main2viz = main2viz
         self.viz2main = viz2main
 
+        self.use_segmentation_colors = False
+
     def render(self, t: float, frametime: float):
         self.viewport.use()
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -142,13 +144,18 @@ class Window(WindowEvents):
                 ptex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
                 ctex = self.ctx.texture((w, h), 1, dtype="f4", alignment=4)
                 itex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
-                self.textures[keyframe.frame_id] = ptex, ctex, itex
+                stex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
+                self.textures[keyframe.frame_id] = (ptex, ctex, itex, stex)
                 ptex, ctex, itex = self.textures[keyframe.frame_id]
                 itex.write(keyframe.uimg.numpy().astype(np.float32).tobytes())
 
-            ptex, ctex, itex = self.textures[keyframe.frame_id]
+            ptex, ctex, itex, stex = self.textures[keyframe.frame_id]
+
             ptex.write(X.tobytes())
             ctex.write(C.tobytes())
+
+            if keyframe.seg_colors is not None:
+                stex.write(keyframe.seg_colors.numpy().astype(np.float32).tobytes())
 
         for kf_idx in range(N_keyframes):
             keyframe = self.keyframes[kf_idx]
@@ -168,7 +175,7 @@ class Window(WindowEvents):
 
             ptex, ctex, itex = self.textures[keyframe.frame_id]
             if self.show_all:
-                self.render_pointmap(keyframe.T_WC.cpu(), w, h, ptex, ctex, itex)
+                self.render_pointmap(keyframe.T_WC.cpu(), w, h, ptex, ctex, itex, stex)
 
         if self.show_keyframe_edges:
             with self.states.lock:
@@ -208,6 +215,7 @@ class Window(WindowEvents):
                 ptex,
                 ctex,
                 itex,
+                stex,
                 use_img=True,
                 depth_bias=self.depth_bias,
             )
@@ -248,6 +256,11 @@ class Window(WindowEvents):
         _, self.show_all = imgui.checkbox("show all", self.show_all)
         imgui.same_line()
         _, self.follow_cam = imgui.checkbox("follow cam", self.follow_cam)
+
+        imgui.spacing()
+        _, self.use_segmentation_colors = imgui.checkbox(
+            "Use Segmentation Colors", self.use_segmentation_colors
+        )
 
         imgui.spacing()
         shader_options = [
@@ -331,11 +344,17 @@ class Window(WindowEvents):
     def send_msg(self):
         self.viz2main.put(self.state)
 
-    def render_pointmap(self, T_WC, w, h, ptex, ctex, itex, use_img=True, depth_bias=0):
+    def render_pointmap(
+        self, T_WC, w, h, ptex, ctex, itex, stex=None, use_img=True, depth_bias=0
+    ):
         w, h = int(w), int(h)
         ptex.use(0)
         ctex.use(1)
         itex.use(2)
+        if stex is not None:
+            stex.use(3)
+            vao.program["seg_texture"].value = 3
+            vao.program["use_seg"] = self.use_segmentation_colors
         model = T_WC.matrix().numpy().astype(np.float32).T
 
         vao = self.ctx.vertex_array(self.pointmap_prog, [], skip_errors=True)

@@ -20,6 +20,8 @@ uniform float depth_bias = 0.0;
 uniform sampler2D pointmap;
 uniform sampler2D confs;
 uniform sampler2D img;
+uniform sampler2D seg_texture;
+uniform bool use_seg = false;
 
 out fragData
 {
@@ -53,7 +55,11 @@ void main(void) {
   for (int i = 0; i < 4; ++i) {
     ivec2 offset = offsets[i];
     pixels[i].pos = texelFetch(pointmap, ivec2(x, y) + offset, 0).xyz;
-    pixels[i].col = texelFetch(img, ivec2(x, y) + offset, 0).xyz;
+    if (use_seg) {
+      pixels[i].col = texelFetch(seg_texture, ivec2(x, y) + offset, 0).xyz;
+    } else {
+      pixels[i].col = texelFetch(img, ivec2(x, y) + offset, 0).xyz;
+    }
     pixels[i].conf = texelFetch(confs, ivec2(x, y), 0).x;
   }
 

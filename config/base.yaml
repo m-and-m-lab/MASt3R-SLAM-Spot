@@ -56,3 +56,8 @@ retrieval:
 reloc:
   min_match_frac: 0.3
   strict: True
+
+segmentation:
+  enabled: false
+  model_path: "FastSAM-x.pt"
+  run_on_keyframes: true  # Only segment keyframes to save compute
