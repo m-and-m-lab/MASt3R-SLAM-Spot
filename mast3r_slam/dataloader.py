@@ -205,6 +205,15 @@ def mock_image_client(video_path):
 def pixel_format_string_to_enum(enum_string):
     return dict(image_pb2.Image.PixelFormat.items()).get(enum_string)
 
+def rotate_calibration_clockwise(calib, W, H):
+    fx, fy, cx, cy = calib[:4]
+    distortion = calib[4:] if len(calib) > 4 else []
+    new_fx = fy
+    new_fy = fx
+    new_cx = H - 1 - cy
+    new_cy = cx
+    new_calib = [new_fx, new_fy, new_cx, new_cy] + list(distortion)
+    return new_calib, H, W
 
 class SpotCameraStream:
     def __init__(self, source = "frontleft_fisheye_image"):
@@ -251,7 +260,8 @@ class SpotDataset(MonocularDataset):
         if self.mode == "real":
             spot = SpotCameraStream()
             self.stream = spot.frames()
-            self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, spot.intrinsics)
+            rotated_calib, W, H = rotate_calibration_clockwise(spot.intrinsics, 640, 480)
+            self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, rotated_calib, always_undistort=True)
 
     def __len__(self):
         return 99999999
@@ -281,6 +291,7 @@ class SpotDataset(MonocularDataset):
         elif response.shot.image.format == 1:
             data = np.frombuffer(response.shot.image.data, dtype=np.uint8)
             img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
         else:
             raise ValueError(f"Unsupported image format: {response.shot.image.format}")
         
@@ -433,9 +444,6 @@ class Intrinsics:
             np.zeros((H, W, 3)), self.img_size, return_transformation=True
         )
         self.K_frame = self.K.copy()
-        self.K_frame[0, 0] = self.K[0, 0] / scale_w
-        self.K_frame[1, 1] = self.K[1, 1] / scale_h
-        self.K_frame[0, 2] = self.K[0, 2] / scale_w - half_crop_w
         self.K_frame[1, 2] = self.K[1, 2] / scale_h - half_crop_h
 
     def remap(self, img):

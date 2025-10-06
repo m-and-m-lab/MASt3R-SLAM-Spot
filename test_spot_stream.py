@@ -22,7 +22,6 @@ def main():
 
     args = parser.parse_args()
     load_config(args.config)
-    print(args.dataset)
     print(config)
     print("Starting Spot camera stream test...")
     try:
@@ -43,6 +42,7 @@ def main():
             # The data is JPEG compressed, so we need to decode it
             data = np.frombuffer(response.shot.image.data, dtype=np.uint8)
             img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
 
             if img is None:
                 print("Failed to decode image. The data might not be a valid JPEG.")

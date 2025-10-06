@@ -1,7 +1,7 @@
 import open3d as o3d
 
 # Replace with your PLY file path
-ply_path = "logs/sample_scene.ply"
+ply_path = "logs/sample.ply"
 
 # Load the point cloud
 pcd = o3d.io.read_point_cloud(ply_path)
