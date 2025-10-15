@@ -112,7 +112,10 @@ class Window(WindowEvents):
         h, w = curr_frame.img_shape.flatten()
         self.frustums.make_frustum(h, w)
 
-        self.curr_img_np = curr_frame.uimg.numpy()
+        if self.use_segmentation_colors and curr_frame.seg_colors is not None:
+            self.curr_img_np = curr_frame.seg_colors.numpy()
+        else:
+            self.curr_img_np = curr_frame.uimg.numpy()
         self.curr_img.write(self.curr_img_np)
 
         cam_T_WC = as_SE3(curr_frame.T_WC).cpu()
@@ -161,7 +164,10 @@ class Window(WindowEvents):
             keyframe = self.keyframes[kf_idx]
             h, w = keyframe.img_shape.flatten()
             if kf_idx == N_keyframes - 1:
-                self.kf_img_np = keyframe.uimg.numpy()
+                if self.use_segmentation_colors and keyframe.seg_colors is not None:
+                    self.kf_img_np = keyframe.seg_colors.numpy()
+                else:
+                    self.kf_img_np = keyframe.uimg.numpy()
                 self.kf_img.write(self.kf_img_np)
 
             color = [1, 0, 0, 1]
