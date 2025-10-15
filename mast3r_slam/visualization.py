@@ -146,7 +146,7 @@ class Window(WindowEvents):
                 itex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
                 stex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
                 self.textures[keyframe.frame_id] = (ptex, ctex, itex, stex)
-                ptex, ctex, itex = self.textures[keyframe.frame_id]
+                ptex, ctex, itex, stex = self.textures[keyframe.frame_id]
                 itex.write(keyframe.uimg.numpy().astype(np.float32).tobytes())
 
             ptex, ctex, itex, stex = self.textures[keyframe.frame_id]
@@ -173,7 +173,7 @@ class Window(WindowEvents):
                     thickness=self.line_thickness * self.scale,
                 )
 
-            ptex, ctex, itex = self.textures[keyframe.frame_id]
+            ptex, ctex, itex, stex = self.textures[keyframe.frame_id]
             if self.show_all:
                 self.render_pointmap(keyframe.T_WC.cpu(), w, h, ptex, ctex, itex, stex)
 
@@ -348,6 +348,11 @@ class Window(WindowEvents):
         self, T_WC, w, h, ptex, ctex, itex, stex=None, use_img=True, depth_bias=0
     ):
         w, h = int(w), int(h)
+        
+        model = T_WC.matrix().numpy().astype(np.float32).T
+
+        vao = self.ctx.vertex_array(self.pointmap_prog, [], skip_errors=True)
+
         ptex.use(0)
         ctex.use(1)
         itex.use(2)
@@ -355,9 +360,7 @@ class Window(WindowEvents):
             stex.use(3)
             vao.program["seg_texture"].value = 3
             vao.program["use_seg"] = self.use_segmentation_colors
-        model = T_WC.matrix().numpy().astype(np.float32).T
 
-        vao = self.ctx.vertex_array(self.pointmap_prog, [], skip_errors=True)
         vao.program["m_camera"].write(self.camera.gl_matrix())
         vao.program["m_model"].write(model)
         vao.program["m_proj"].write(self.camera.proj_mat.gl_matrix())

@@ -5,9 +5,9 @@ import torch
 import cv2
 
 # Add FastSAM to path if needed
-fastsam_path = Path(__file__).parent.parent / "thirdparty" / "FastSAM"
-if fastsam_path.exists():
-    sys.path.insert(0, str(fastsam_path))
+# fastsam_path = Path(__file__).parent.parent / "thirdparty" / "FastSAM"
+# if fastsam_path.exists():
+#     sys.path.insert(0, str(fastsam_path))
 
 try:
     from fastsam import FastSAM, FastSAMPrompt
