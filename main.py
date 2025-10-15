@@ -275,7 +275,12 @@ if __name__ == "__main__":
                 frame.update_pointmap(X_init, C_init)
 
                 if segmentation.enabled:
-                    img_np = img if isinstance(img, np.ndarray) else img
+                    if hasattr(frame, 'uimg'):
+                        img_np = frame.uimg.cpu().numpy()
+                    elif isinstance(img, torch.Tensor):
+                        img_np = img.cpu().numpy()
+                    else: 
+                        img_np = img
                     seg_colors = segmentation.segment_image(img_np)
 
                     if seg_colors is not None:

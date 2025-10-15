@@ -35,13 +35,18 @@ class SegmentationModule:
         img: numpy array (H, W, 3) in RGB, values 0-1 (float)
         Returns: colored segmentation map (H, W, 3) in 0-1 range
         """
-        if not self.enabled:
+        if not self.enabled or self.model is None:
+            print("Segmentation module not enabled or model not loaded.")
             return None
+        
+        if isinstance(img, torch.Tensor):
+            img = img.cpu().numpy()
 
         # FastSAM expects uint8
         img_uint8 = (img * 255).astype(np.uint8)
 
         try:
+            print(f"Running segmentation on image input type: {type(img)}, converted to  {type(img_uint8)}")
             results = self.model(
                 img_uint8,
                 device=self.device,
@@ -61,6 +66,8 @@ class SegmentationModule:
             return colored_mask
         except Exception as e:
             print(f"Segmentation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def create_colored_mask(self, masks, shape):
