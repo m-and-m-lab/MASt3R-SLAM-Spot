@@ -38,15 +38,11 @@ class SegmentationModule:
         if not self.enabled or self.model is None:
             print("Segmentation module not enabled or model not loaded.")
             return None
-        
-        if isinstance(img, torch.Tensor):
-            img = img.cpu().numpy()
 
         # FastSAM expects uint8
         img_uint8 = (img * 255).astype(np.uint8)
 
         try:
-            print(f"Running segmentation on image input type: {type(img)}, converted to  {type(img_uint8)}")
             results = self.model(
                 img_uint8,
                 device=self.device,
@@ -56,11 +52,16 @@ class SegmentationModule:
                 iou=0.9,
             )
 
-            prompt_process = FastSAMPrompt(img_uint8, results, device=self.device)
-            masks = prompt_process.everything_prompt()
-
-            if masks is None or len(masks) == 0:
+            if len(results) == 0 or results[0].masks is None:
+                print("No segmentation results.")
                 return None
+            masks = results[0].masks.data.cpu().numpy()
+
+
+            # prompt_process = FastSAMPrompt(img_uint8, results, device=self.device)
+            # masks = prompt_process.everything_prompt()
+            # if masks is None or len(masks) == 0:
+            #     return None
 
             colored_mask = self.create_colored_mask(masks, img.shape[:2])
             return colored_mask
@@ -80,6 +81,8 @@ class SegmentationModule:
         colors = np.random.rand(len(masks), 3)
 
         for i, mask in enumerate(masks):
-            colored[mask] = colors[i]
+            # print(f"Mask type {i}: {type(mask)}")
+            mask_bool = mask.astype(bool)
+            colored[mask_bool] = colors[i]
 
         return colored

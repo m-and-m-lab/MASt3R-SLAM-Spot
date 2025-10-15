@@ -269,15 +269,16 @@ if __name__ == "__main__":
             )
             frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
 
+            print(f"Mode {mode}")
+
             if mode == Mode.INIT:
                 # Initialize via mono inference, and encoded features neeed for database
                 X_init, C_init = mast3r_inference_mono(model, frame)
                 frame.update_pointmap(X_init, C_init)
 
                 if segmentation.enabled:
-                    if hasattr(frame, 'uimg'):
-                        img_np = frame.uimg.cpu().numpy()
-                    elif isinstance(img, torch.Tensor):
+                    # print(f"Precossing semgentation {type(img)}")
+                    if isinstance(img, torch.Tensor): #Unlikely but just in case you break something
                         img_np = img.cpu().numpy()
                     else: 
                         img_np = img

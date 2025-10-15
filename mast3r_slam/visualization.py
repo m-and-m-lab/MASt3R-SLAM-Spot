@@ -209,11 +209,15 @@ class Window(WindowEvents):
                 ptex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
                 ctex = self.ctx.texture((w, h), 1, dtype="f4", alignment=4)
                 itex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
-                self.textures["curr"] = ptex, ctex, itex
-            ptex, ctex, itex = self.textures["curr"]
+                stex = self.ctx.texture((w, h), 3, dtype="f4", alignment=4)
+                self.textures["curr"] = ptex, ctex, itex, stex
+            ptex, ctex, itex, stex = self.textures["curr"]
             ptex.write(X.tobytes())
             ctex.write(C.tobytes())
             itex.write(depth2rgb(X[..., -1], colormap="turbo"))
+
+            if curr_frame.seg_colors is not None:
+                stex.write(curr_frame.seg_colors.numpy().astype(np.float32).tobytes())
             self.render_pointmap(
                 curr_frame.T_WC.cpu(),
                 w,
