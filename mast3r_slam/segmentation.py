@@ -6,12 +6,10 @@ import cv2
 
 try:
     from fastsam import FastSAM, FastSAMPrompt
-    import clip
 except ImportError:
     FastSAM = None
     FastSAMPrompt = None
-    clip = None
-    print("Warning: FastSAM or CLIP not found. Segmentation disabled.")
+    print("Warning: FastSAM not found. Segmentation disabled.")
 
 
 class SegmentationModule:
@@ -40,23 +38,16 @@ class SegmentationModule:
         # Store which points in SLAM point cloud belong to tracked object
         self.object_point_indices = None
 
-        # Load CLIP if tracking single object with text
+        # NO CLIP - using IoU-only tracking
         self.clip_model = None
         self.clip_preprocess = None
-        if self.enabled and self.track_single_object and object_name:
+
+        if self.enabled:
             try:
                 self.model = FastSAM(model_path)
-                if clip is not None:
-                    self.clip_model, self.clip_preprocess = clip.load(
-                        "ViT-B/32", device=device
-                    )
-                    print(f"Initialized object tracking for: '{object_name}'")
-            except Exception as e:
-                print(f"Failed to load models: {e}")
-                self.enabled = False
-        elif self.enabled:
-            try:
-                self.model = FastSAM(model_path)
+                print(f"✓ FastSAM loaded successfully")
+                if self.track_single_object:
+                    print(f"✓ Single object tracking enabled (IoU-based, no CLIP)")
             except Exception as e:
                 print(f"Failed to load FastSAM model: {e}")
                 self.enabled = False
@@ -76,7 +67,7 @@ class SegmentationModule:
         if not self.enabled or self.model is None:
             return None
 
-        if self.track_single_object and self.object_name:
+        if self.track_single_object:
             return self._segment_single_object(img, current_pose, frame)
         else:
             return self._segment_everything(img)
@@ -101,8 +92,8 @@ class SegmentationModule:
 
             # Strategy based on initialization and camera motion
             if not self.initialized:
-                # First frame: find object by text
-                mask = self._find_object_by_text(img_uint8, results)
+                # First frame: select largest mask
+                mask = self._select_initial_object(results)
                 if mask is not None:
                     self.initialized = True
                     self.frames_since_detection = 0
@@ -140,37 +131,33 @@ class SegmentationModule:
             traceback.print_exc()
             return None
 
-    def _find_object_by_text(self, img_uint8, results):
-        """Find object using CLIP text prompt"""
-        if self.clip_model is None:
-            print("CLIP not available, cannot use text prompts")
-            return None
-
+    def _select_initial_object(self, results):
+        """Select largest mask as the target object"""
         try:
-            prompt_process = FastSAMPrompt(img_uint8, results, device=self.device)
-
-            # Use text prompt to find the object
-            ann = prompt_process.text_prompt(text=self.object_name)
-
-            if ann is not None and len(ann) > 0:
-                # Get the first (best) match
-                mask = ann[0] if isinstance(ann, list) else ann
-                self.object_mask_history.append(mask)
-                print(f"✓ Found object: '{self.object_name}'")
-                return mask
-            else:
-                print(f"✗ Could not find object: '{self.object_name}'")
+            masks = results[0].masks.data.cpu().numpy()
+            if len(masks) == 0:
+                print("✗ No masks found in first frame")
                 return None
 
+            # Find largest mask (most pixels)
+            areas = [mask.sum() for mask in masks]
+            largest_idx = np.argmax(areas)
+            mask = masks[largest_idx]
+
+            self.object_mask_history.append(mask)
+            print(
+                f"✓ Selected largest mask as target ({int(areas[largest_idx])} pixels)"
+            )
+            return mask
         except Exception as e:
-            print(f"Text prompt failed: {e}")
+            print(f"Initial object selection failed: {e}")
             return None
 
     def _track_with_pose(self, img_uint8, results, current_pose, img_shape):
         """Track object using camera pose and previous mask"""
         if current_pose is None or self.last_pose is None:
-            # Fallback to text-based re-detection
-            return self._find_object_by_text(img_uint8, results)
+            # No pose info - fallback to selecting largest mask
+            return self._select_initial_object(results)
 
         # Calculate camera movement
         translation = np.linalg.norm(current_pose[:3, 3] - self.last_pose[:3, 3])
@@ -179,7 +166,7 @@ class SegmentationModule:
         masks = results[0].masks.data.cpu().numpy()
 
         # Strategy based on camera motion
-        if translation < 0.2:  # Small movement - use IoU matching
+        if translation < 0.3:  # Small/medium movement - use IoU matching
             if len(self.object_mask_history) > 0:
                 prev_mask = self.object_mask_history[-1]
                 best_mask = self._find_best_overlap(masks, prev_mask)
@@ -189,9 +176,9 @@ class SegmentationModule:
                     print(f"✓ Tracked via IoU (camera moved {translation:.3f}m)")
                     return best_mask
 
-        # Large movement or no good overlap - use text re-detection
-        print(f"Camera moved {translation:.3f}m, re-detecting with text...")
-        mask = self._find_object_by_text(img_uint8, results)
+        # Large movement or no good overlap - re-select largest mask
+        print(f"Camera moved {translation:.3f}m, re-selecting object...")
+        mask = self._select_initial_object(results)
         if mask is not None:
             self.last_pose = current_pose
         return mask
@@ -252,7 +239,7 @@ class SegmentationModule:
 
         if self.frames_since_detection > self.max_frames_without_detection:
             print(
-                f"⚠ Lost object '{self.object_name}' for {self.frames_since_detection} frames, resetting..."
+                f"⚠ Lost object for {self.frames_since_detection} frames, resetting..."
             )
             self.initialized = False
             self.object_mask_history = []
