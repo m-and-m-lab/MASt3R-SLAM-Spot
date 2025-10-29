@@ -177,6 +177,8 @@ if __name__ == "__main__":
         model_path=config.get("segmentation", {}).get("model_path", "FastSAM-x.pt"),
         device=device,
         enabled=config.get("segmentation", {}).get("enabled", False),
+        object_name="bottle",  # <-- ADD THIS: specify object to track
+        track_single_object=True,  # <-- ADD THIS: enable single object mode
     )
 
     if args.calib:
@@ -278,11 +280,23 @@ if __name__ == "__main__":
 
                 if segmentation.enabled:
                     # print(f"Precossing semgentation {type(img)}")
-                    if isinstance(img, torch.Tensor): #Unlikely but just in case you break something
+                    if isinstance(
+                        img, torch.Tensor
+                    ):  # Unlikely but just in case you break something
                         img_np = img.cpu().numpy()
-                    else: 
+                    else:
                         img_np = img
-                    seg_colors = segmentation.segment_image(img_np)
+
+                    seg_colors = segmentation.segment_image(
+                        img_np,
+                        current_pose=(
+                            frame.T_WC.matrix()[0].cpu().numpy()
+                            if hasattr(frame.T_WC, "matrix")
+                            else None
+                        ),
+                        depth_map=None,  # Add if you have depth
+                        camera_matrix=K.cpu().numpy() if K is not None else None,
+                    )
 
                     if seg_colors is not None:
                         h, w = frame.img_shape.flatten().cpu().numpy()
@@ -320,7 +334,16 @@ if __name__ == "__main__":
             if add_new_kf:
                 if segmentation.enabled:
                     img_np = img if isinstance(img, np.ndarray) else img
-                    seg_colors = segmentation.segment_image(img_np)
+                    seg_colors = segmentation.segment_image(
+                        img_np,
+                        current_pose=(
+                            frame.T_WC.matrix()[0].cpu().numpy()
+                            if hasattr(frame.T_WC, "matrix")
+                            else None
+                        ),
+                        depth_map=None,
+                        camera_matrix=K.cpu().numpy() if K is not None else None,
+                    )
 
                     if seg_colors is not None:
                         import cv2
