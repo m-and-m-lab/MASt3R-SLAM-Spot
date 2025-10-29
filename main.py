@@ -177,8 +177,8 @@ if __name__ == "__main__":
         model_path=config.get("segmentation", {}).get("model_path", "FastSAM-x.pt"),
         device=device,
         enabled=config.get("segmentation", {}).get("enabled", False),
-        object_name="bottle",  # <-- ADD THIS: specify object to track
-        track_single_object=True,  # <-- ADD THIS: enable single object mode
+        object_name=config.get("segmentation", {}).get("object_name", None),  # ADD THIS
+        track_single_object=True,
     )
 
     if args.calib:

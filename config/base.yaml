@@ -60,4 +60,5 @@ reloc:
 segmentation:
   enabled: true
   model_path: "FastSAM-x.pt"
+  object_name: "cup"
   run_on_keyframes: true  # Only segment keyframes to save compute
