@@ -112,10 +112,7 @@ class Window(WindowEvents):
         h, w = curr_frame.img_shape.flatten()
         self.frustums.make_frustum(h, w)
 
-        if self.use_segmentation_colors and curr_frame.seg_colors is not None:
-            self.curr_img_np = curr_frame.seg_colors.numpy()
-        else:
-            self.curr_img_np = curr_frame.uimg.numpy()
+        self.curr_img_np = curr_frame.uimg.numpy()
         self.curr_img.write(self.curr_img_np)
 
         cam_T_WC = as_SE3(curr_frame.T_WC).cpu()
@@ -358,7 +355,7 @@ class Window(WindowEvents):
         self, T_WC, w, h, ptex, ctex, itex, stex=None, use_img=True, depth_bias=0
     ):
         w, h = int(w), int(h)
-        
+
         model = T_WC.matrix().numpy().astype(np.float32).T
 
         vao = self.ctx.vertex_array(self.pointmap_prog, [], skip_errors=True)
