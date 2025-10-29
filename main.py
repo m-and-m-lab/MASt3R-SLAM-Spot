@@ -8,6 +8,8 @@ import lietorch
 import torch
 import tqdm
 import yaml
+import traceback
+
 import numpy as np
 from mast3r_slam.global_opt import FactorGraph
 
@@ -287,16 +289,26 @@ if __name__ == "__main__":
                     else:
                         img_np = img
 
+                    current_pose_np = None
+                    if hasattr(frame.T_WC, "matrix"):
+                        current_pose_np = frame.T_WC.matrix()[0].cpu().numpy()
+
                     seg_colors = segmentation.segment_image(
                         img_np,
-                        current_pose=(
-                            frame.T_WC.matrix()[0].cpu().numpy()
-                            if hasattr(frame.T_WC, "matrix")
-                            else None
-                        ),
-                        depth_map=None,  # Add if you have depth
-                        camera_matrix=K.cpu().numpy() if K is not None else None,
+                        current_pose=current_pose_np,
+                        frame=frame,
                     )
+
+                    # seg_colors = segmentation.segment_image(
+                    #     img_np,
+                    #     current_pose=(
+                    #         frame.T_WC.matrix()[0].cpu().numpy()
+                    #         if hasattr(frame.T_WC, "matrix")
+                    #         else None
+                    #     ),
+                    #     depth_map=None,  # Add if you have depth
+                    #     camera_matrix=K.cpu().numpy() if K is not None else None,
+                    # )
 
                     if seg_colors is not None:
                         h, w = frame.img_shape.flatten().cpu().numpy()
@@ -334,20 +346,28 @@ if __name__ == "__main__":
             if add_new_kf:
                 if segmentation.enabled:
                     img_np = img if isinstance(img, np.ndarray) else img
+                    # seg_colors = segmentation.segment_image(
+                    #     img_np,
+                    #     current_pose=(
+                    #         frame.T_WC.matrix()[0].cpu().numpy()
+                    #         if hasattr(frame.T_WC, "matrix")
+                    #         else None
+                    #     ),
+                    #     depth_map=None,
+                    #     camera_matrix=K.cpu().numpy() if K is not None else None,
+                    # )
+
+                    current_pose_np = None
+                    if hasattr(frame.T_WC, "matrix"):
+                        current_pose_np = frame.T_WC.matrix()[0].cpu().numpy()
+
                     seg_colors = segmentation.segment_image(
                         img_np,
-                        current_pose=(
-                            frame.T_WC.matrix()[0].cpu().numpy()
-                            if hasattr(frame.T_WC, "matrix")
-                            else None
-                        ),
-                        depth_map=None,
-                        camera_matrix=K.cpu().numpy() if K is not None else None,
+                        current_pose=current_pose_np,
+                        frame=frame,  # PASS THE FRAME!
                     )
 
                     if seg_colors is not None:
-                        import cv2
-
                         h, w = frame.img_shape.flatten().cpu().numpy()
                         seg_colors = cv2.resize(seg_colors, (int(w), int(h)))
                         frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
@@ -370,8 +390,6 @@ if __name__ == "__main__":
         states.set_mode(Mode.TERMINATED)
     except Exception as e:
         print("Exception in main loop:", e)
-        import traceback
-
         traceback.print_exc()
         states.set_mode(Mode.TERMINATED)
     finally:

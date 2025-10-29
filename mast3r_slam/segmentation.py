@@ -30,13 +30,15 @@ class SegmentationModule:
         self.object_name = object_name
 
         # Tracking state
-        self.object_3d_points = None
         self.object_mask_history = []
         self.object_color = np.array([1.0, 0.0, 0.0])  # Red - consistent color
         self.last_pose = None
         self.initialized = False
         self.frames_since_detection = 0
         self.max_frames_without_detection = 5
+
+        # Store which points in SLAM point cloud belong to tracked object
+        self.object_point_indices = None
 
         # Load CLIP if tracking single object with text
         self.clip_model = None
@@ -59,25 +61,27 @@ class SegmentationModule:
                 print(f"Failed to load FastSAM model: {e}")
                 self.enabled = False
 
-    def segment_image(self, img, current_pose=None, depth_map=None, camera_matrix=None):
+    def segment_image(self, img, current_pose=None, frame=None):
         """
-        Main segmentation function that handles both modes:
-        - Single object tracking (if object_name is set)
-        - Multi-object segmentation (if object_name is None)
+        Main segmentation function
+
+        Args:
+            img: numpy array (H, W, 3) in RGB, values 0-1 (float)
+            current_pose: 4x4 camera pose matrix (optional)
+            frame: Frame object with X_canon, C, etc. (optional)
+
+        Returns:
+            colored segmentation map (H, W, 3) in 0-1 range
         """
         if not self.enabled or self.model is None:
             return None
 
         if self.track_single_object and self.object_name:
-            return self._segment_single_object(
-                img, current_pose, depth_map, camera_matrix
-            )
+            return self._segment_single_object(img, current_pose, frame)
         else:
             return self._segment_everything(img)
 
-    def _segment_single_object(
-        self, img, current_pose=None, depth_map=None, camera_matrix=None
-    ):
+    def _segment_single_object(self, img, current_pose=None, frame=None):
         """Track a single object across frames"""
         img_uint8 = (img * 255).astype(np.uint8) if img.dtype == np.float32 else img
 
@@ -104,29 +108,27 @@ class SegmentationModule:
                     self.frames_since_detection = 0
                     if current_pose is not None:
                         self.last_pose = current_pose
-                    if depth_map is not None and camera_matrix is not None:
-                        self._update_3d_model(
-                            mask, depth_map, current_pose, camera_matrix
-                        )
+
+                    # Mark which SLAM points belong to this object
+                    if frame is not None:
+                        self._mark_object_points(mask, frame)
+
                     return self._create_single_color_mask(mask, img.shape[:2])
                 return None
 
             else:
-                # Subsequent frames: use projection + text verification
+                # Subsequent frames: use tracking
                 mask = self._track_with_pose(
                     img_uint8, results, current_pose, img.shape[:2]
                 )
 
                 if mask is not None:
                     self.frames_since_detection = 0
-                    if (
-                        depth_map is not None
-                        and camera_matrix is not None
-                        and current_pose is not None
-                    ):
-                        self._update_3d_model(
-                            mask, depth_map, current_pose, camera_matrix
-                        )
+
+                    # Update which SLAM points belong to this object
+                    if frame is not None:
+                        self._mark_object_points(mask, frame)
+
                     return self._create_single_color_mask(mask, img.shape[:2])
                 else:
                     return self._handle_lost_object(img.shape[:2])
@@ -154,10 +156,10 @@ class SegmentationModule:
                 # Get the first (best) match
                 mask = ann[0] if isinstance(ann, list) else ann
                 self.object_mask_history.append(mask)
-                print(f"Found object: '{self.object_name}'")
+                print(f"✓ Found object: '{self.object_name}'")
                 return mask
             else:
-                print(f"Could not find object: '{self.object_name}'")
+                print(f"✗ Could not find object: '{self.object_name}'")
                 return None
 
         except Exception as e:
@@ -165,7 +167,7 @@ class SegmentationModule:
             return None
 
     def _track_with_pose(self, img_uint8, results, current_pose, img_shape):
-        """Track object using camera pose and 3D points"""
+        """Track object using camera pose and previous mask"""
         if current_pose is None or self.last_pose is None:
             # Fallback to text-based re-detection
             return self._find_object_by_text(img_uint8, results)
@@ -177,23 +179,25 @@ class SegmentationModule:
         masks = results[0].masks.data.cpu().numpy()
 
         # Strategy based on camera motion
-        if translation < 0.2:  # Small movement - use previous mask location
+        if translation < 0.2:  # Small movement - use IoU matching
             if len(self.object_mask_history) > 0:
                 prev_mask = self.object_mask_history[-1]
                 best_mask = self._find_best_overlap(masks, prev_mask)
                 if best_mask is not None:
                     self.object_mask_history.append(best_mask)
                     self.last_pose = current_pose
+                    print(f"✓ Tracked via IoU (camera moved {translation:.3f}m)")
                     return best_mask
 
         # Large movement or no good overlap - use text re-detection
+        print(f"Camera moved {translation:.3f}m, re-detecting with text...")
         mask = self._find_object_by_text(img_uint8, results)
         if mask is not None:
             self.last_pose = current_pose
         return mask
 
     def _find_best_overlap(self, masks, prev_mask, overlap_threshold=0.3):
-        """Find mask with best overlap with previous mask"""
+        """Find mask with best IoU overlap with previous mask"""
         best_iou = 0
         best_mask = None
 
@@ -201,6 +205,7 @@ class SegmentationModule:
             mask_bool = mask.astype(bool)
             prev_bool = prev_mask.astype(bool)
 
+            # Calculate IoU (Intersection over Union)
             intersection = np.logical_and(mask_bool, prev_bool).sum()
             union = np.logical_or(mask_bool, prev_bool).sum()
 
@@ -210,25 +215,54 @@ class SegmentationModule:
                     best_iou = iou
                     best_mask = mask
 
+        if best_mask is not None:
+            print(f"  Best IoU: {best_iou:.3f}")
+
         return best_mask
 
-    def _update_3d_model(self, mask, depth_map, pose, camera_matrix):
-        """Update 3D point cloud of the tracked object"""
-        # This is a placeholder - you can integrate with your SLAM 3D points
-        # Store 3D points in world coordinates for visibility checking
-        pass
+    def _mark_object_points(self, mask, frame):
+        """Mark which points in SLAM's point cloud belong to tracked object"""
+        if frame is None or frame.X_canon is None:
+            return
+
+        try:
+            # Resize mask to match frame's point cloud shape
+            h, w = frame.img_shape.flatten().cpu().numpy()
+            mask_resized = cv2.resize(mask.astype(np.uint8), (int(w), int(h)))
+
+            # Flatten to match X_canon shape (H*W, 3)
+            mask_flat = mask_resized.flatten().astype(bool)
+
+            # Store indices of points belonging to this object
+            self.object_point_indices = mask_flat
+
+            # Optional: Get actual 3D points for future use
+            if frame.X_canon.shape[0] == mask_flat.shape[0]:
+                object_points_3d = frame.X_canon[mask_flat]
+                print(
+                    f"  Marked {mask_flat.sum()} / {mask_flat.shape[0]} points as object"
+                )
+
+        except Exception as e:
+            print(f"Failed to mark object points: {e}")
 
     def _handle_lost_object(self, img_shape):
         """Handle case when object is temporarily lost"""
         self.frames_since_detection += 1
 
         if self.frames_since_detection > self.max_frames_without_detection:
-            print(f"Lost object '{self.object_name}' for too long, resetting...")
+            print(
+                f"⚠ Lost object '{self.object_name}' for {self.frames_since_detection} frames, resetting..."
+            )
             self.initialized = False
             self.object_mask_history = []
+            self.object_point_indices = None
             return None
 
-        # Return last known mask with reduced opacity or None
+        # Return last known mask with reduced opacity
+        print(
+            f"⚠ Object not found (frame {self.frames_since_detection}/{self.max_frames_without_detection})"
+        )
         if len(self.object_mask_history) > 0:
             return self._create_single_color_mask(
                 self.object_mask_history[-1], img_shape, alpha=0.5
@@ -288,6 +322,7 @@ class SegmentationModule:
         """Reset tracking state"""
         self.initialized = False
         self.object_mask_history = []
-        self.object_3d_points = None
+        self.object_point_indices = None
         self.last_pose = None
         self.frames_since_detection = 0
+        print("Tracking reset")
