@@ -60,5 +60,10 @@ reloc:
 segmentation:
   enabled: true
   model_path: "FastSAM-x.pt"
-  object_name: "cup"
-  run_on_keyframes: true  # Only segment keyframes to save compute
+  object_name: "box"  # Text prompt - change to "book", "laptop", etc.
+  track_single_object: false
+
+object_tracking:
+  match_threshold: 0.05  # meters - objects closer than this are considered same
+  max_points: 10000  # max accumulated points per object
+  min_points: 100  # minimum points to register an object

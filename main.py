@@ -26,12 +26,11 @@ from mast3r_slam.multiprocess_utils import new_queue, try_get_msg
 from mast3r_slam.tracker import FrameTracker
 from mast3r_slam.visualization import WindowMsg, run_visualization
 from mast3r_slam.segmentation import SegmentationModule
+from mast3r_slam.object_tracker_3d import MultiObjectTracker3D
 import torch.multiprocessing as mp
 
 
 def relocalization(frame, keyframes, factor_graph, retrieval_database):
-    # we are adding and then removing from the keyframe, so we need to be careful.
-    # The lock slows viz down but safer this way...
     with keyframes.lock:
         kf_idx = []
         retrieval_inds = retrieval_database.update(
@@ -45,7 +44,7 @@ def relocalization(frame, keyframes, factor_graph, retrieval_database):
         if kf_idx:
             keyframes.append(frame)
             n_kf = len(keyframes)
-            kf_idx = list(kf_idx)  # convert to list
+            kf_idx = list(kf_idx)
             frame_idx = [n_kf - 1] * len(kf_idx)
             print("RELOCALIZING against kf ", n_kf - 1, " and ", kf_idx)
             if factor_graph.add_factors(
@@ -73,20 +72,6 @@ def relocalization(frame, keyframes, factor_graph, retrieval_database):
             else:
                 factor_graph.solve_GN_rays()
         return successful_loop_closure
-
-
-def apply_segmentation(segmentation, img, frame):
-    """Apply segmentation to a frame and store colors"""
-    if not segmentation.enabled:
-        return
-
-    img_np = img if isinstance(img, np.ndarray) else img
-    seg_colors = segmentation.segment_image(img_np, frame=frame)
-
-    if seg_colors is not None:
-        h, w = frame.img_shape.flatten().cpu().numpy()
-        seg_colors = cv2.resize(seg_colors, (int(w), int(h)))
-        return torch.from_numpy(seg_colors).to("cpu")
 
 
 def run_backend(cfg, model, states, keyframes, K):
@@ -117,9 +102,7 @@ def run_backend(cfg, model, states, keyframes, K):
             time.sleep(0.01)
             continue
 
-        # Graph Construction
         kf_idx = []
-        # k to previous consecutive keyframes
         n_consec = 1
         for j in range(min(n_consec, idx)):
             kf_idx.append(idx - 1 - j)
@@ -137,9 +120,9 @@ def run_backend(cfg, model, states, keyframes, K):
         if len(lc_inds) > 0:
             print("Database retrieval", idx, ": ", lc_inds)
 
-        kf_idx = set(kf_idx)  # Remove duplicates by using set
-        kf_idx.discard(idx)  # Remove current kf idx if included
-        kf_idx = list(kf_idx)  # convert to list
+        kf_idx = set(kf_idx)
+        kf_idx.discard(idx)
+        kf_idx = list(kf_idx)
         frame_idx = [idx] * len(kf_idx)
         if kf_idx:
             factor_graph.add_factors(
@@ -189,13 +172,29 @@ if __name__ == "__main__":
     dataset.subsample(config["dataset"]["subsample"])
     h, w = dataset.get_img_shape()[0]
 
+    # Create segmentation module with YOLO-World
     segmentation = SegmentationModule(
-        model_path=config.get("segmentation", {}).get("model_path", "FastSAM-x.pt"),
         device=device,
         enabled=config.get("segmentation", {}).get("enabled", False),
-        object_name=config.get("segmentation", {}).get("object_name", None),  # ADD THIS
-        track_single_object=True,
+        object_classes=config.get("segmentation", {}).get("object_classes", None),
     )
+
+    # Create 3D object tracker
+    object_tracker = None
+    if segmentation.enabled:
+        object_tracker = MultiObjectTracker3D(
+            segmentation_module=segmentation,
+            match_distance_threshold=config.get("object_tracking", {}).get(
+                "match_threshold", 0.25
+            ),
+            max_points_per_object=config.get("object_tracking", {}).get(
+                "max_points", 10000
+            ),
+            min_points_for_tracking=config.get("object_tracking", {}).get(
+                "min_points", 100
+            ),
+        )
+        print(f"✓ 3D Object Tracker initialized")
 
     if args.calib:
         with open(args.calib, "r") as f:
@@ -235,7 +234,6 @@ if __name__ == "__main__":
         )
         keyframes.set_intrinsics(K)
 
-    # remove the trajectory from the previous run
     if dataset.save_results:
         save_dir, seq_name = eval.prepare_savedir(args, dataset)
         traj_file = save_dir / f"{seq_name}.txt"
@@ -254,6 +252,7 @@ if __name__ == "__main__":
     i = 0
     fps_timer = time.time()
     frames = []
+
     try:
         while True:
             mode = states.get_mode()
@@ -279,7 +278,6 @@ if __name__ == "__main__":
             if save_frames:
                 frames.append(img)
 
-            # get frames last camera pose
             T_WC = (
                 lietorch.Sim3.Identity(1, device=device)
                 if i == 0
@@ -290,12 +288,20 @@ if __name__ == "__main__":
             print(f"Mode {mode}")
 
             if mode == Mode.INIT:
-                # Initialize via mono inference, and encoded features neeed for database
+                # Initialize SLAM
                 X_init, C_init = mast3r_inference_mono(model, frame)
                 frame.update_pointmap(X_init, C_init)
 
-                if segmentation.enabled:
-                    frame.seg_colors = apply_segmentation(segmentation, img, frame)
+                # Track objects in 3D if enabled
+                if object_tracker is not None:
+                    T_WC_np = frame.T_WC.cpu().numpy()
+                    if hasattr(T_WC_np, "matrix"):
+                        T_WC_np = T_WC_np.matrix()
+                    seg_colors = object_tracker.segment_and_track(
+                        img, frame, T_WC_np, frame_id=i
+                    )
+                    if seg_colors is not None:
+                        frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
 
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
@@ -305,19 +311,42 @@ if __name__ == "__main__":
                 continue
 
             if mode == Mode.TRACKING:
+                # Track camera pose
                 add_new_kf, match_info, try_reloc = tracker.track(frame)
-                if segmentation.enabled:
-                    frame.seg_colors = apply_segmentation(segmentation, img, frame)
+
+                # Track objects in 3D if enabled (for every frame, not just keyframes)
+                if object_tracker is not None:
+                    T_WC_np = frame.T_WC.cpu().numpy()
+                    if hasattr(T_WC_np, "matrix"):
+                        T_WC_np = T_WC_np.matrix()
+                    seg_colors = object_tracker.segment_and_track(
+                        img, frame, T_WC_np, frame_id=i
+                    )
+                    if seg_colors is not None:
+                        frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
+
                 if try_reloc:
                     states.set_mode(Mode.RELOC)
                 states.set_frame(frame)
 
             elif mode == Mode.RELOC:
+                # Relocalization mode
                 X, C = mast3r_inference_mono(model, frame)
                 frame.update_pointmap(X, C)
+
+                # Track objects during relocalization
+                if object_tracker is not None:
+                    T_WC_np = frame.T_WC.cpu().numpy()
+                    if hasattr(T_WC_np, "matrix"):
+                        T_WC_np = T_WC_np.matrix()
+                    seg_colors = object_tracker.segment_and_track(
+                        img, frame, T_WC_np, frame_id=i
+                    )
+                    if seg_colors is not None:
+                        frame.seg_colors = torch.from_numpy(seg_colors).to("cpu")
+
                 states.set_frame(frame)
                 states.queue_reloc()
-                # In single threaded mode, make sure relocalization happen for every frame
                 while config["single_thread"]:
                     with states.lock:
                         if states.reloc_sem.value == 0:
@@ -327,23 +356,22 @@ if __name__ == "__main__":
             else:
                 raise Exception("Invalid mode")
 
+            # Add keyframe if needed
             if add_new_kf:
-                if segmentation.enabled:
-                    frame.seg_colors = apply_segmentation(segmentation, img, frame)
-
+                # Already tracked objects above, just add to keyframes
                 keyframes.append(frame)
                 states.queue_global_optimization(len(keyframes) - 1)
-                # In single threaded mode, wait for the backend to finish
                 while config["single_thread"]:
                     with states.lock:
                         if len(states.global_optimizer_tasks) == 0:
                             break
                     time.sleep(0.01)
-            # log time
+
             if i % 30 == 0:
                 FPS = i / (time.time() - fps_timer)
                 print(f"FPS: {FPS}")
             i += 1
+
     except KeyboardInterrupt:
         print("Interrupted by user. Saving results...")
         states.set_mode(Mode.TERMINATED)
@@ -364,13 +392,21 @@ if __name__ == "__main__":
             eval.save_keyframes(
                 save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
             )
+
+            # Save tracked objects
+            if object_tracker is not None:
+                object_tracker.save_objects_to_file(save_dir / f"{seq_name}_objects")
+                print(
+                    f"\n✓ Saved {len(object_tracker.get_all_objects())} tracked objects"
+                )
+
         if save_frames:
             savedir = pathlib.Path(f"logs/frames/{datetime_now}")
             savedir.mkdir(exist_ok=True, parents=True)
-            for i, frame in tqdm.tqdm(enumerate(frames), total=len(frames)):
-                frame = (frame * 255).clip(0, 255)
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(f"{savedir}/{i}.png", frame)
+            for idx, frame_img in tqdm.tqdm(enumerate(frames), total=len(frames)):
+                frame_img = (frame_img * 255).clip(0, 255)
+                frame_img = cv2.cvtColor(frame_img, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(f"{savedir}/{idx}.png", frame_img)
 
         print("done")
         backend.join()

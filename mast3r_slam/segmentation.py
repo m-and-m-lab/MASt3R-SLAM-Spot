@@ -1,263 +1,136 @@
-import sys
-from pathlib import Path
 import numpy as np
 import torch
 import cv2
 
 try:
-    from fastsam import FastSAM, FastSAMPrompt
+    from ultralytics import YOLO
 except ImportError:
-    FastSAM = None
-    FastSAMPrompt = None
-    print("Warning: FastSAM not found. Segmentation disabled.")
+    YOLO = None
+    print("❌ YOLO not found. Install: pip install ultralytics")
 
 
 class SegmentationModule:
+    """
+    Segmentation module using YOLO-World for open-vocabulary object detection.
+    Supports text prompts like "cup", "book", "laptop", etc.
+    """
+
     def __init__(
         self,
-        model_path="FastSAM-x.pt",
         device="cuda",
         enabled=False,
-        object_name=None,
-        track_single_object=True,
+        object_classes=None,  # List of classes or single class: ["cup", "book"] or "cup"
     ):
-        self.enabled = enabled and FastSAM is not None
+        """
+        Args:
+            device: Device to run model on
+            enabled: Whether segmentation is enabled
+            object_classes: Text prompt(s) for objects to track
+                           Examples: "cup", ["cup", "book", "bottle"]
+        """
+        self.enabled = enabled
         self.model = None
         self.device = device
-        self.track_single_object = track_single_object
-        self.object_name = object_name
+        self.object_classes = object_classes
 
-        # Simple per-frame coloring (no tracking across frames)
-        self.object_color = np.array([1.0, 0.0, 0.0])  # Red for single object mode
+        if not self.enabled:
+            return
 
-        if self.enabled:
-            try:
-                self.model = FastSAM(model_path)
-                print(f"✓ FastSAM loaded successfully")
-                if self.track_single_object:
-                    print(f"✓ Single object mode: segments center object per keyframe")
-                else:
-                    print(f"✓ Multi-object mode: segments all objects per keyframe")
-            except Exception as e:
-                print(f"Failed to load FastSAM model: {e}")
-                self.enabled = False
+        if YOLO is None:
+            print("❌ YOLO not available. Install: pip install ultralytics")
+            self.enabled = False
+            return
+
+        try:
+            # Load YOLO-World model
+            # Options: yolov8s-worldv2.pt (small, fast)
+            #          yolov8m-worldv2.pt (medium)
+            #          yolov8l-worldv2.pt (large, more accurate)
+            self.model = YOLO("yolov8s-worldv2.pt")
+            self.model.to(device)
+
+            # Set classes to detect based on text prompts
+            if self.object_classes:
+                classes = (
+                    [self.object_classes]
+                    if isinstance(self.object_classes, str)
+                    else self.object_classes
+                )
+                self.model.set_classes(classes)
+                print(f"✓ YOLO-World loaded - tracking: {classes}")
+            else:
+                print(
+                    f"✓ YOLO-World loaded - open vocabulary mode (detects common objects)"
+                )
+
+        except Exception as e:
+            print(f"❌ Failed to load YOLO-World: {e}")
+            import traceback
+
+            traceback.print_exc()
+            self.enabled = False
 
     def segment_image(self, img, current_pose=None, frame=None):
         """
-        Segment current frame independently.
+        Segment objects using YOLO-World with text prompts.
 
         Args:
             img: numpy array (H, W, 3) in RGB, values 0-1 (float)
-            current_pose: 4x4 camera pose matrix (unused, kept for compatibility)
-            frame: Frame object with X_canon for point cloud coloring
+            current_pose: unused (kept for compatibility)
+            frame: unused (kept for compatibility)
 
         Returns:
-            colored segmentation map (H, W, 3) in 0-1 range
+            List of (mask, class_name, confidence) tuples
+            or None if no objects detected
         """
         if not self.enabled or self.model is None:
             return None
 
-        if self.track_single_object:
-            return self._segment_single_object(img, frame)
-        else:
-            return self._segment_everything(img)
-
-    def _segment_single_object(self, img, frame=None):
-        """
-        Segment object at center of current frame.
-        Each keyframe is segmented independently.
-        """
         img_uint8 = (img * 255).astype(np.uint8) if img.dtype == np.float32 else img
 
         try:
-            # Run FastSAM
-            results = self.model(
+            # Run YOLO-World inference
+            results = self.model.predict(
                 img_uint8,
-                device=self.device,
-                retina_masks=True,
-                imgsz=512,
-                conf=0.6,
-                iou=0.5,
+                conf=0.1,  # Detection confidence threshold
+                iou=0.5,  # NMS IoU threshold
+                verbose=False,
             )
 
             if len(results) == 0 or results[0].masks is None:
-                print("⚠ FastSAM found no masks")
                 return None
 
-            masks = results[0].masks.data.cpu().numpy()
-            print(f"FastSAM found {len(masks)} masks")
+            result = results[0]
 
-            # Select object at center (or closest to center)
-            mask = self._select_center_object(masks, img.shape[:2])
-
-            if mask is not None:
-                # Mark which points in the frame's point cloud belong to this object
-                if frame is not None:
-                    self._mark_frame_object_points(mask, frame)
-
-                return self._create_single_color_mask(mask, img.shape[:2])
-
-            return None
-
-        except Exception as e:
-            print(f"Segmentation failed: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return None
-
-    def _select_center_object(self, masks, img_shape):
-        """
-        Select object at center of image, excluding very large masks.
-        This is called independently for each keyframe.
-        """
-        try:
-            if len(masks) == 0:
-                print("✗ No masks found")
+            # Check if masks exist
+            if result.masks is None or len(result.masks) == 0:
                 return None
 
-            H, W = img_shape[:2]
+            masks = result.masks.data.cpu().numpy()  # (N, H, W)
+            boxes = result.boxes
+
+            # Get class names and confidences
+            class_ids = boxes.cls.cpu().numpy().astype(int)
+            class_names = [result.names[cls_id] for cls_id in class_ids]
+            confidences = boxes.conf.cpu().numpy()
+
+            # Filter detections by quality
+            H, W = img_uint8.shape[:2]
             total_pixels = H * W
-            center_y, center_x = H // 2, W // 2
 
-            # Filter parameters
-            max_size_ratio = 0.4  # Reject masks > 40% of image
-            min_size_pixels = 500  # Reject tiny masks
+            filtered_results = []
+            for mask, class_name, conf in zip(masks, class_names, confidences):
+                area_ratio = mask.sum() / total_pixels
 
-            # First pass: find mask at center that's not too large
-            for i, mask in enumerate(masks):
-                area = mask.sum()
-                area_ratio = area / total_pixels
+                # Keep detections with reasonable size and good confidence
+                if 0.005 < area_ratio < 0.7 and conf > 0.15:
+                    filtered_results.append((mask, class_name, conf))
 
-                if area_ratio > max_size_ratio:
-                    continue
-
-                if area < min_size_pixels:
-                    continue
-
-                if mask[center_y, center_x]:
-                    print(
-                        f"✓ Selected mask {i} at center - {int(area)} pixels ({area_ratio:.1%})"
-                    )
-                    return mask
-
-            # Second pass: find closest suitable mask to center
-            print("⚠ No suitable mask at center, finding closest...")
-            best_mask = None
-            best_mask_idx = None
-            min_distance = float("inf")
-
-            for i, mask in enumerate(masks):
-                area = mask.sum()
-                area_ratio = area / total_pixels
-
-                if area_ratio > max_size_ratio or area < min_size_pixels:
-                    continue
-
-                ys, xs = np.where(mask)
-                if len(ys) > 0:
-                    mask_center_y = ys.mean()
-                    mask_center_x = xs.mean()
-                    distance = np.sqrt(
-                        (mask_center_x - center_x) ** 2
-                        + (mask_center_y - center_y) ** 2
-                    )
-
-                    if distance < min_distance:
-                        min_distance = distance
-                        best_mask = mask
-                        best_mask_idx = i
-
-            if best_mask is not None:
-                area = best_mask.sum()
-                print(
-                    f"✓ Selected closest mask {best_mask_idx} - {int(area)} pixels, distance: {min_distance:.1f}"
-                )
-                return best_mask
-
-            print("✗ Could not find any suitable mask")
-            return None
+            return filtered_results if filtered_results else None
 
         except Exception as e:
-            print(f"Object selection failed: {e}")
+            print(f"YOLO segmentation failed: {e}")
             import traceback
 
             traceback.print_exc()
             return None
-
-    def _mark_frame_object_points(self, mask, frame):
-        """
-        Mark which 3D points in THIS frame's point cloud belong to the segmented object.
-        This is done per-keyframe, not accumulated across frames.
-        """
-        if frame is None or frame.X_canon is None:
-            return
-
-        try:
-            h, w = frame.img_shape.flatten().cpu().numpy()
-            mask_resized = cv2.resize(mask.astype(np.uint8), (int(w), int(h)))
-            mask_flat = mask_resized.flatten().astype(bool)
-
-            # Store the boolean mask indicating which points are part of the object
-            # This is stored in the frame itself, not accumulated globally
-            if hasattr(frame, "X_canon") and frame.X_canon is not None:
-                if frame.X_canon.shape[0] == mask_flat.shape[0]:
-                    # You can store this as an attribute on the frame
-                    frame.object_point_mask = mask_flat
-                    num_object_points = mask_flat.sum()
-                    print(
-                        f"  Marked {num_object_points} points in this keyframe as object"
-                    )
-
-        except Exception as e:
-            print(f"Failed to mark frame object points: {e}")
-
-    def _create_single_color_mask(self, mask, img_shape, alpha=1.0):
-        """Create colored mask for visualization"""
-        H, W = img_shape[:2]
-        colored = np.zeros((H, W, 3), dtype=np.float32)
-        mask_bool = mask.astype(bool)
-        colored[mask_bool] = self.object_color * alpha
-        return colored
-
-    def _segment_everything(self, img):
-        """
-        Multi-object segmentation - segments all objects in current frame.
-        Each keyframe is segmented independently.
-        """
-        img_uint8 = (img * 255).astype(np.uint8) if img.dtype == np.float32 else img
-
-        try:
-            results = self.model(
-                img_uint8,
-                device=self.device,
-                retina_masks=True,
-                imgsz=512,
-                conf=0.4,
-                iou=0.9,
-            )
-
-            if len(results) == 0 or results[0].masks is None:
-                return None
-
-            masks = results[0].masks.data.cpu().numpy()
-            colored_mask = self._create_multi_colored_mask(masks, img.shape[:2])
-            return colored_mask
-
-        except Exception as e:
-            print(f"Segmentation failed: {e}")
-            return None
-
-    def _create_multi_colored_mask(self, masks, shape):
-        """Assign different colors to different objects"""
-        H, W = shape
-        colored = np.zeros((H, W, 3), dtype=np.float32)
-
-        np.random.seed(42)  # Consistent colors across runs
-        colors = np.random.rand(len(masks), 3)
-
-        for i, mask in enumerate(masks):
-            mask_bool = mask.astype(bool)
-            colored[mask_bool] = colors[i]
-
-        return colored
