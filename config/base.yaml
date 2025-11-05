@@ -59,9 +59,11 @@ reloc:
 
 segmentation:
   enabled: true
-  model_path: "FastSAM-x.pt"
-  object_name: "box"  # Text prompt - change to "book", "laptop", etc.
-  track_single_object: false
+  object_classes: ["cup", "bottle", "bowl", "laptop", "book"]
+
+  # model_path: "FastSAM-x.pt"
+  # object_name: "cup"  # Text prompt - change to "book", "laptop", etc.
+  # track_single_object: false
 
 object_tracking:
   match_threshold: 0.05  # meters - objects closer than this are considered same

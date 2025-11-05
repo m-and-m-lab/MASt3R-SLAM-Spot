@@ -11,27 +11,32 @@ except ImportError:
 
 class SegmentationModule:
     """
-    Segmentation module using YOLO-World for open-vocabulary object detection.
-    Supports text prompts like "cup", "book", "laptop", etc.
+    Segmentation module using YOLOv8-seg for pixel-precise segmentation masks.
+    Works with 80 COCO classes out of the box.
     """
 
     def __init__(
         self,
         device="cuda",
         enabled=False,
-        object_classes=None,  # List of classes or single class: ["cup", "book"] or "cup"
+        object_classes=None,
     ):
         """
         Args:
             device: Device to run model on
             enabled: Whether segmentation is enabled
-            object_classes: Text prompt(s) for objects to track
-                           Examples: "cup", ["cup", "book", "bottle"]
+            object_classes: List of COCO class names to track
+                           Examples: "cup", ["cup", "bottle", "book"]
         """
         self.enabled = enabled
         self.model = None
         self.device = device
-        self.object_classes = object_classes
+
+        # Convert to list
+        if isinstance(object_classes, str):
+            self.object_classes = [object_classes]
+        else:
+            self.object_classes = object_classes
 
         if not self.enabled:
             return
@@ -42,29 +47,47 @@ class SegmentationModule:
             return
 
         try:
-            # Load YOLO-World model
-            # Options: yolov8s-worldv2.pt (small, fast)
-            #          yolov8m-worldv2.pt (medium)
-            #          yolov8l-worldv2.pt (large, more accurate)
-            self.model = YOLO("yolov8s-worldv2.pt")
+            print(f"📥 Loading YOLOv8-seg (segmentation model)...")
+
+            # USE -seg MODEL FOR SEGMENTATION MASKS!
+            # Options:
+            #   yolov8n-seg.pt (nano, 6MB, fastest)
+            #   yolov8s-seg.pt (small, 22MB)
+            #   yolov8m-seg.pt (medium, 52MB)
+            #   yolov8l-seg.pt (large, 83MB)
+            self.model = YOLO("yolov8n-seg.pt")  # This gives MASKS!
             self.model.to(device)
 
-            # Set classes to detect based on text prompts
+            print(f"✓ YOLOv8-seg loaded successfully")
+
+            # Get available class names
+            self.class_names = self.model.names
+
             if self.object_classes:
-                classes = (
-                    [self.object_classes]
-                    if isinstance(self.object_classes, str)
-                    else self.object_classes
-                )
-                self.model.set_classes(classes)
-                print(f"✓ YOLO-World loaded - tracking: {classes}")
+                # Find class IDs for requested classes
+                self.filter_class_ids = []
+                for obj_class in self.object_classes:
+                    for class_id, class_name in self.class_names.items():
+                        if obj_class.lower() in class_name.lower():
+                            self.filter_class_ids.append(class_id)
+
+                if self.filter_class_ids:
+                    print(
+                        f"✓ Tracking: {[self.class_names[i] for i in self.filter_class_ids]}"
+                    )
+                else:
+                    print(f"⚠ No matching classes for {self.object_classes}")
+                    print(f"  Available: person, bicycle, car, motorcycle, airplane,")
+                    print(f"            bus, train, truck, boat, bottle, cup, fork,")
+                    print(f"            knife, spoon, bowl, laptop, mouse, keyboard,")
+                    print(f"            cell phone, book, clock, vase, etc.")
+                    self.filter_class_ids = None
             else:
-                print(
-                    f"✓ YOLO-World loaded - open vocabulary mode (detects common objects)"
-                )
+                self.filter_class_ids = None
+                print(f"✓ Detecting all 80 COCO classes")
 
         except Exception as e:
-            print(f"❌ Failed to load YOLO-World: {e}")
+            print(f"❌ Failed to load YOLOv8: {e}")
             import traceback
 
             traceback.print_exc()
@@ -72,16 +95,15 @@ class SegmentationModule:
 
     def segment_image(self, img, current_pose=None, frame=None):
         """
-        Segment objects using YOLO-World with text prompts.
+        Segment objects using YOLOv8-seg.
+        Returns pixel-precise segmentation masks!
 
         Args:
             img: numpy array (H, W, 3) in RGB, values 0-1 (float)
-            current_pose: unused (kept for compatibility)
-            frame: unused (kept for compatibility)
 
         Returns:
             List of (mask, class_name, confidence) tuples
-            or None if no objects detected
+            Each mask is (H, W) boolean array - EXACT same as FastSAM!
         """
         if not self.enabled or self.model is None:
             return None
@@ -89,32 +111,34 @@ class SegmentationModule:
         img_uint8 = (img * 255).astype(np.uint8) if img.dtype == np.float32 else img
 
         try:
-            # Run YOLO-World inference
+            # Run YOLOv8 segmentation
             results = self.model.predict(
                 img_uint8,
-                conf=0.1,  # Detection confidence threshold
-                iou=0.5,  # NMS IoU threshold
+                conf=0.25,
+                iou=0.5,
                 verbose=False,
+                classes=self.filter_class_ids,
             )
 
-            if len(results) == 0 or results[0].masks is None:
+            if len(results) == 0:
                 return None
 
             result = results[0]
 
-            # Check if masks exist
+            # THIS IS THE KEY: result.masks contains pixel-precise masks!
             if result.masks is None or len(result.masks) == 0:
                 return None
 
-            masks = result.masks.data.cpu().numpy()  # (N, H, W)
+            # Get masks - SAME FORMAT AS FASTSAM!
+            masks = result.masks.data.cpu().numpy()  # (N, H, W) boolean masks
             boxes = result.boxes
 
             # Get class names and confidences
             class_ids = boxes.cls.cpu().numpy().astype(int)
-            class_names = [result.names[cls_id] for cls_id in class_ids]
+            class_names = [self.class_names[cls_id] for cls_id in class_ids]
             confidences = boxes.conf.cpu().numpy()
 
-            # Filter detections by quality
+            # Filter by quality
             H, W = img_uint8.shape[:2]
             total_pixels = H * W
 
@@ -122,14 +146,14 @@ class SegmentationModule:
             for mask, class_name, conf in zip(masks, class_names, confidences):
                 area_ratio = mask.sum() / total_pixels
 
-                # Keep detections with reasonable size and good confidence
-                if 0.005 < area_ratio < 0.7 and conf > 0.15:
-                    filtered_results.append((mask, class_name, conf))
+                if 0.005 < area_ratio < 0.7 and conf > 0.25:
+                    # Return EXACT same format as FastSAM!
+                    filtered_results.append((mask, class_name, float(conf)))
 
             return filtered_results if filtered_results else None
 
         except Exception as e:
-            print(f"YOLO segmentation failed: {e}")
+            print(f"YOLOv8 segmentation failed: {e}")
             import traceback
 
             traceback.print_exc()
